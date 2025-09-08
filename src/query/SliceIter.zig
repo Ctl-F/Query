@@ -18,7 +18,8 @@ pub fn SliceIter(comptime T: type) type {
                 .context = this,
                 .vtable = .{
                     .next = This.v_next,
-                    //TODO: index, seek
+                    .index = This.v_index,
+                    .seek = This.v_seek,
                 },
             };
         }
@@ -26,6 +27,24 @@ pub fn SliceIter(comptime T: type) type {
         fn v_next(this: *anyopaque) ?T {
             const this_ptr: *This = @ptrCast(@alignCast(this));
             return this_ptr.next();
+        }
+
+        fn v_index(this: *anyopaque) usize {
+            const this_ptr: *This = @ptrCast(@alignCast(this));
+            return this_ptr.tell();
+        }
+
+        fn v_seek(this: *anyopaque, pos: usize) void {
+            const this_ptr: *This = @ptrCast(@alignCast(this));
+            return this_ptr.seek(pos);
+        }
+
+        pub fn seek(this: *This, pos: usize) void {
+            this.index = @min(pos, this.items.len);
+        }
+
+        pub fn tell(this: *const This) usize {
+            return this.index;
         }
 
         pub fn next(this: *This) ?T {

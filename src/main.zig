@@ -1,39 +1,52 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
+const std = @import("std");
+const query = @import("query");
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    const in = std.io.getStdIn().reader();
+    const out = std.io.getStdOut().writer();
 
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
+    var stdin = std.io.bufferedReader(in);
+    var stdout = std.io.bufferedWriter(out);
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+    var raw_buffer = [_]u8{0} ** 4096;
+    var buffer = [_]u32{0} ** 32;
 
-    try bw.flush(); // Don't forget to flush!
-}
+    _ = try stdout.write("Up to 32 numbers: ");
+    try stdout.flush();
+    const read_count = try stdin.read(&raw_buffer);
 
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
+    var index: usize = 0;
+    var iter = std.mem.splitAny(u8, raw_buffer[0..read_count], " \n\r");
+    while (iter.next()) |what| {
+        if (what.len == 0) continue;
 
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
+        if (index >= buffer.len) {
+            std.debug.print("Too many numbers entered. The rest will be ignored.\n", .{});
+            break;
         }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+
+        buffer[index] = std.fmt.parseInt(u32, what, 10) catch {
+            std.debug.print("`{s}` is not a valid number!", .{what});
+            return error.InvalidSequence;
+        };
+        index += 1;
+    }
+
+    try query_inter(buffer[0..index]);
 }
 
-const std = @import("std");
+fn query_inter(buffer: []u32) !void {
+    var sliceIter = query.SliceIter(u32).init(buffer);
+    var qry = query.Query(u32).init(sliceIter.to_iter());
+
+    if (qry.any(struct {
+        pub fn what(value: u32) bool {
+            return value == 42;
+        }
+    })) {
+        std.debug.print("The answer was found.\n", .{});
+    } else {
+        std.debug.print("The question was wrong\n", .{});
+    }
+    std.debug.print("There were {} numbers\n", .{qry.count()});
+}

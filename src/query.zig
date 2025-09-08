@@ -37,8 +37,62 @@ pub fn Query(comptime T: type) type {
             return this.iter.next() == null;
         }
 
+        pub const WhereIter = struct {
+            iter: Iter(T),
+            predicate: *const fn (T) bool,
+
+            pub fn next(this: *@This()) ?T {
+                if (this.iter.next()) |v| {
+                    if (this.predicate(v)) {
+                        return v;
+                    }
+                    return null;
+                }
+                return null;
+            }
+
+            pub fn to_iter(this: *@This()) Iter(T) {
+                return .{
+                    .context = this,
+                    .vtable = .{
+                        .next = @This().next,
+                        .index = this.iter.index,
+                        .seek = this.iter.seek,
+                    },
+                };
+            }
+        };
+
+        pub fn where(this: *This, predicate: anytype) WhereIter {
+            const info = if (@TypeOf(predicate) == type) @typeInfo(predicate) else @typeInfo(@TypeOf(predicate));
+
+            switch (info) {
+                .@"fn" => |fun| {
+                    if (fun.return_type == null or fun.return_type.? != bool) {
+                        @compileError("`any` Predicate must return a boolean");
+                    }
+                    if (fun.params.len != 1) {
+                        @compileError("`any` Predicate must accept a single parameter");
+                    }
+                    if (fun.params[0].type == null or fun.params[0].type.? != T) {
+                        @compileError("Expected `" ++ @typeName(T) ++ "` as parameter type, got `" ++ @typeName(fun.params[0].type) ++ "`");
+                    }
+
+                    return .{
+                        .predicate = predicate,
+                        .iter = this.iter,
+                    };
+                },
+                .@"struct" => {
+                    return this._any_struct(predicate);
+                },
+                else => @compileError("Expected function predicate or struct predicate, got " ++ @typeName(predicate)),
+            }
+        }
+
         pub fn any(this: *This, predicate: anytype) bool {
-            const info = @typeInfo(predicate);
+            const info = if (@TypeOf(predicate) == type) @typeInfo(predicate) else @typeInfo(@TypeOf(predicate));
+            //@compileLog(info);
             switch (info) {
                 .@"fn" => |fun| {
                     if (fun.return_type == null or fun.return_type.? != bool) {
@@ -53,18 +107,19 @@ pub fn Query(comptime T: type) type {
 
                     return this._any_fn(predicate);
                 },
-                .@"struct" => |str| {
-                    for (str.decls) |decl| {
-                        if (std.mem.eql(decl.name, "what")) {
-                            break;
-                        }
-                    } else {
-                        @compileError("`any` Predicate struct must declare a `what` function");
-                    }
+                .@"struct" => {
+                    // for (str.decls) |decl| {
+                    //     @compileLog(decl.name);
+                    //     if (std.mem.eql(u8, decl.name, "what")) {
+                    //         break;
+                    //     }
+                    // } else {
+                    //     @compileError("`any` Predicate struct must declare a `what` function");
+                    // }
 
                     return this._any_struct(predicate);
                 },
-                else => @compileError("Expected function predicate or struct predicate"),
+                else => @compileError("Expected function predicate or struct predicate, got " ++ @typeName(predicate)),
             }
         }
 
@@ -167,7 +222,7 @@ test "Query Any Struct" {
     var query = Query(u32).init(slit.to_iter());
 
     try std.testing.expect(query.any(struct {
-        fn what(i: u32) bool {
+        pub fn what(i: u32) bool {
             return i == 2;
         }
     }));
