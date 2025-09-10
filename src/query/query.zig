@@ -1,6 +1,6 @@
 const std = @import("std");
-const _SliceIter = @import("query/SliceIter.zig");
-const _Iter = @import("query/Iter.zig");
+const _SliceIter = @import("SliceIter.zig");
+const _Iter = @import("Iter.zig");
 
 pub const Iter = _Iter.Iter;
 pub const SliceIter = _SliceIter.SliceIter;
@@ -10,6 +10,7 @@ pub fn Query(comptime T: type) type {
         const This = @This();
 
         iter: Iter(T),
+        seen: std.AutoHashMap(T, void),
 
         pub fn init(iter: Iter(T)) This {
             return .{
@@ -17,7 +18,12 @@ pub fn Query(comptime T: type) type {
             };
         }
 
-        pub fn count(this: *This) usize {
+        pub fn count(const_this: *const This) usize {
+            // the overall side-effects of this function should respect the "const" qualifier
+            // but we do need to make some temporary modifications to our iterator thus we must drop
+            // const for the purposes of this method
+            var this: *This = @constCast(const_this);
+
             const pos = this.iter.index();
             defer this.iter.seek(pos);
 
@@ -29,7 +35,9 @@ pub fn Query(comptime T: type) type {
             return num;
         }
 
-        pub fn empty(this: *This) bool {
+        pub fn empty(const_this: *const This) bool {
+            var this: *This = @constCast(const_this);
+
             const pos = this.iter.index();
             defer this.iter.seek(pos);
 
@@ -42,28 +50,74 @@ pub fn Query(comptime T: type) type {
             predicate: *const fn (T) bool,
 
             pub fn next(this: *@This()) ?T {
-                if (this.iter.next()) |v| {
+                while (this.iter.next()) |v| {
                     if (this.predicate(v)) {
                         return v;
                     }
-                    return null;
                 }
                 return null;
+            }
+
+            pub fn extend(this: *@This()) Query(T) {
+                return Query(T).init(this.to_iter());
+            }
+
+            fn v_extend(this: *anyopaque) Query(T) {
+                const this_ptr: *@This() = @ptrCast(@alignCast(this));
+                return this_ptr.extend();
+            }
+
+            fn v_next(this: *anyopaque) ?T {
+                return next(@ptrCast(@alignCast(this)));
+            }
+
+            fn v_index(this: *anyopaque) usize {
+                const this_ptr: *@This() = @ptrCast(@alignCast(this));
+                return this_ptr.iter.index();
+            }
+
+            fn v_seek(this: *anyopaque, pos: usize) void {
+                const this_ptr: *@This() = @ptrCast(@alignCast(this));
+                return this_ptr.iter.seek(pos);
             }
 
             pub fn to_iter(this: *@This()) Iter(T) {
                 return .{
                     .context = this,
                     .vtable = .{
-                        .next = @This().next,
-                        .index = this.iter.index,
-                        .seek = this.iter.seek,
+                        .next = @This().v_next,
+                        .index = @This().v_index,
+                        .seek = @This().v_seek,
+                        .extend = @This().v_extend,
                     },
                 };
             }
         };
 
-        pub fn where(this: *This, predicate: anytype) WhereIter {
+        pub const DistinctIter = struct {
+            iter: Iter(T),
+            query: *Query(T),
+
+            pub fn init(iter: Iter(T), query: *Query(T)) DistinctIter {
+                return .{
+                    .iter = iter,
+                    .query = query,
+                };
+            } // TODO: Finish
+
+            pub fn next(this: @This()) ?T {
+                while (this.iter.next()) |v| {
+                    if (this.query.seen.contains(v)) {
+                        continue;
+                    }
+                    this.query.seen.put(v) catch {};
+                    return v;
+                }
+                return null;
+            }
+        };
+
+        pub fn where(this: *const This, predicate: anytype) WhereIter {
             const info = if (@TypeOf(predicate) == type) @typeInfo(predicate) else @typeInfo(@TypeOf(predicate));
 
             switch (info) {
@@ -84,13 +138,18 @@ pub fn Query(comptime T: type) type {
                     };
                 },
                 .@"struct" => {
-                    return this._any_struct(predicate);
+                    return .{
+                        .predicate = predicate.what,
+                        .iter = this.iter,
+                    };
                 },
                 else => @compileError("Expected function predicate or struct predicate, got " ++ @typeName(predicate)),
             }
         }
 
-        pub fn any(this: *This, predicate: anytype) bool {
+        pub fn any(const_this: *const This, predicate: anytype) bool {
+            var this = @constCast(const_this);
+
             const info = if (@TypeOf(predicate) == type) @typeInfo(predicate) else @typeInfo(@TypeOf(predicate));
             //@compileLog(info);
             switch (info) {

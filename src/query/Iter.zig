@@ -1,3 +1,5 @@
+const query = @import("query.zig");
+
 pub fn Iter(comptime T: type) type {
     return struct {
         context: *anyopaque,
@@ -7,6 +9,7 @@ pub fn Iter(comptime T: type) type {
             next: *const fn (ctx: *anyopaque) ?T,
             index: *const fn (ctx: *anyopaque) usize,
             seek: *const fn (ctx: *anyopaque, index: usize) void,
+            extend: *const fn (ctx: *anyopaque) query.Query(T),
         };
 
         pub fn next(this: @This()) ?T {
@@ -19,6 +22,10 @@ pub fn Iter(comptime T: type) type {
 
         pub fn seek(this: @This(), pos: usize) void {
             return this.vtable.seek(this.context, pos);
+        }
+
+        pub fn extend(this: @This()) query.Query(T) {
+            return this.vtable.extend(this.context);
         }
     };
 }

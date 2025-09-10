@@ -49,4 +49,15 @@ fn query_inter(buffer: []u32) !void {
         std.debug.print("The question was wrong\n", .{});
     }
     std.debug.print("There were {} numbers\n", .{qry.count()});
+
+    var filter = qry.where(struct {
+        pub fn what(value: u32) bool {
+            return value > 25;
+        }
+    });
+
+    while (filter.next()) |what| {
+        std.debug.print("{}, ", .{what});
+    }
+    std.debug.print("\n{} numbers were larger than 25\n", .{filter.extend().count()});
 }

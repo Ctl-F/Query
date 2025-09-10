@@ -1,4 +1,5 @@
 const _Iter = @import("Iter.zig");
+const Query = @import("query.zig").Query;
 
 pub fn SliceIter(comptime T: type) type {
     return struct {
@@ -20,6 +21,7 @@ pub fn SliceIter(comptime T: type) type {
                     .next = This.v_next,
                     .index = This.v_index,
                     .seek = This.v_seek,
+                    .extend = This.v_extend,
                 },
             };
         }
@@ -37,6 +39,15 @@ pub fn SliceIter(comptime T: type) type {
         fn v_seek(this: *anyopaque, pos: usize) void {
             const this_ptr: *This = @ptrCast(@alignCast(this));
             return this_ptr.seek(pos);
+        }
+
+        fn v_extend(this: *anyopaque) Query(T) {
+            const this_ptr: *This = @ptrCast(@alignCast(this));
+            return this_ptr.extend();
+        }
+
+        pub fn extend(this: *This) Query(T) {
+            return Query(T).init(this.to_iter());
         }
 
         pub fn seek(this: *This, pos: usize) void {
