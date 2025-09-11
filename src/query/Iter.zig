@@ -1,3 +1,4 @@
+const std = @import("std");
 const query = @import("query.zig");
 
 pub fn Iter(comptime T: type) type {
