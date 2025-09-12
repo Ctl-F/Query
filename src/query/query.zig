@@ -1,9 +1,101 @@
 const std = @import("std");
-const _SliceIter = @import("SliceIter.zig");
-const _Iter = @import("Iter.zig");
 
-pub const Iter = _Iter.Iter;
-pub const SliceIter = _SliceIter.SliceIter;
+pub fn Iter(comptime T: type) type {
+    return struct {
+        context: *anyopaque,
+        vtable: VTable,
+
+        pub const VTable = struct {
+            next: *const fn (ctx: *anyopaque) ?T,
+            index: *const fn (ctx: *anyopaque) Index,
+            seek: *const fn (ctx: *anyopaque, index: Index) void,
+            extend: *const fn (ctx: *anyopaque) Query(T),
+        };
+
+        pub fn next(this: @This()) ?T {
+            return this.vtable.next(this.context);
+        }
+
+        pub fn index(this: @This()) Index {
+            return this.vtable.index(this.context);
+        }
+
+        pub fn seek(this: @This(), pos: Index) void {
+            return this.vtable.seek(this.context, pos);
+        }
+
+        pub fn extend(this: @This()) Query(T) {
+            return this.vtable.extend(this.context);
+        }
+    };
+}
+
+pub fn SliceIter(comptime T: type) type {
+    return struct {
+        const This = @This();
+        items: []const T,
+        index: usize,
+
+        pub fn init(slice: []const T) This {
+            return .{
+                .items = slice,
+                .index = 0,
+            };
+        }
+
+        pub fn to_iter(this: *This) Iter(T) {
+            return Iter(T){
+                .context = this,
+                .vtable = .{
+                    .next = This.v_next,
+                    .index = This.v_index,
+                    .seek = This.v_seek,
+                    .extend = This.v_extend,
+                },
+            };
+        }
+
+        fn v_next(this: *anyopaque) ?T {
+            const this_ptr: *This = @ptrCast(@alignCast(this));
+            return this_ptr.next();
+        }
+
+        fn v_index(this: *anyopaque) Index {
+            const this_ptr: *This = @ptrCast(@alignCast(this));
+            return @intCast(this_ptr.tell());
+        }
+
+        fn v_seek(this: *anyopaque, pos: Index) void {
+            const this_ptr: *This = @ptrCast(@alignCast(this));
+            return this_ptr.seek(@truncate(pos));
+        }
+
+        fn v_extend(this: *anyopaque) Query(T) {
+            const this_ptr: *This = @ptrCast(@alignCast(this));
+            return this_ptr.extend();
+        }
+
+        pub fn extend(this: *This) Query(T) {
+            return Query(T).init(this.to_iter());
+        }
+
+        pub fn seek(this: *This, pos: usize) void {
+            this.index = @min(pos, this.items.len);
+        }
+
+        pub fn tell(this: *const This) usize {
+            return this.index;
+        }
+
+        pub fn next(this: *This) ?T {
+            if (this.index >= this.items.len) return null;
+            defer this.index += 1;
+            return this.items[this.index];
+        }
+    };
+}
+
+pub const Index = u128;
 
 pub fn Query(comptime T: type) type {
     return struct {
@@ -77,12 +169,12 @@ pub fn Query(comptime T: type) type {
                 return next(@ptrCast(@alignCast(this)));
             }
 
-            fn v_index(this: *anyopaque) usize {
+            fn v_index(this: *anyopaque) Index {
                 const this_ptr: *@This() = @ptrCast(@alignCast(this));
                 return this_ptr.iter.index();
             }
 
-            fn v_seek(this: *anyopaque, pos: usize) void {
+            fn v_seek(this: *anyopaque, pos: Index) void {
                 const this_ptr: *@This() = @ptrCast(@alignCast(this));
                 return this_ptr.iter.seek(pos);
             }
@@ -117,12 +209,12 @@ pub fn Query(comptime T: type) type {
                     return this_ptr.next();
                 }
 
-                pub fn v_index(this: *const anyopaque) usize {
+                pub fn v_index(this: *const anyopaque) Index {
                     var this_ptr: *@This() = @ptrCast(@alignCast(@constCast(this)));
                     return this_ptr.iter.index();
                 }
 
-                pub fn v_seek(this: *anyopaque, pos: usize) void {
+                pub fn v_seek(this: *anyopaque, pos: Index) void {
                     const this_ptr: *@This() = @ptrCast(@alignCast(this));
                     return this_ptr.iter.seek(pos);
                 }
@@ -146,6 +238,107 @@ pub fn Query(comptime T: type) type {
                         },
                     };
                 }
+            };
+        }
+
+        pub fn JoinIter(comptime V: type, comptime U: type, comptime predicate: fn (T, U) bool, comptime transformer: fn (T, U) V) type {
+            return struct {
+                outer: Iter(T),
+                inner: Iter(U),
+
+                pub fn next(this: *@This()) ?V {
+                    while (this.outer.next()) |o| {
+                        while (this.inner.next()) |i| {
+                            if (predicate(o, i)) {
+                                return transformer(o, i);
+                            }
+                        }
+                        this.inner.seek(0);
+                        std.debug.print(@typeName(U) ++ " has reset and " ++ @typeName(T) ++ " scan will continue\n", .{});
+                    }
+                    return null;
+                }
+
+                pub fn index(this: *@This()) Index {
+                    const outer: u64 = @truncate(this.outer.index());
+                    const inner: u64 = @truncate(this.inner.index());
+
+                    const HALF_INDEX = @typeInfo(Index).int.bits / 2;
+
+                    return (@as(Index, @intCast(outer)) << HALF_INDEX) | @as(Index, @intCast(inner));
+                }
+
+                pub fn seek(this: *@This(), pos: Index) void {
+                    const HALF_INDEX = @typeInfo(Index).int.bits / 2;
+
+                    const inner: u64 = @truncate(pos);
+                    const outer: u64 = @truncate(pos >> HALF_INDEX);
+
+                    this.inner.seek(inner);
+                    this.outer.seek(outer);
+                }
+
+                pub fn extend(this: *const @This()) Query(V) {
+                    return Query(V).init(this.to_iter());
+                }
+
+                fn v_extend(this: *anyopaque) Query(V) {
+                    return extend(@ptrCast(@alignCast(this)));
+                }
+                fn v_seek(this: *anyopaque, pos: Index) void {
+                    return seek(@ptrCast(@alignCast(this)), pos);
+                }
+                fn v_index(this: *anyopaque) Index {
+                    return index(@ptrCast(@alignCast(this)));
+                }
+                fn v_next(this: *anyopaque) ?V {
+                    return next(@ptrCast(@alignCast(this)));
+                }
+
+                pub fn to_iter(this: *const @This()) Iter(V) {
+                    return .{
+                        .context = @constCast(this),
+                        .vtable = .{
+                            .extend = @This().v_extend,
+                            .index = @This().v_index,
+                            .next = @This().v_next,
+                            .seek = @This().v_seek,
+                        },
+                    };
+                }
+            };
+        }
+
+        fn JoinIterType(V: type, U: type, comptime predicate: anytype, comptime transformer: anytype) type {
+            const pr_info = if (@TypeOf(predicate) == type) @typeInfo(predicate) else @typeInfo(@TypeOf(predicate));
+            const tr_info = if (@TypeOf(transformer) == type) @typeInfo(transformer) else @typeInfo(@TypeOf(transformer));
+
+            const predFn = switch (pr_info) {
+                .@"fn" => |fun| fun,
+                .@"struct" => predicate.what,
+                else => @compileError("Unexpected predicate type: " ++ @typeName(predicate)),
+            };
+
+            const tranFn = switch (tr_info) {
+                .@"fn" => |fun| fun,
+                .@"struct" => transformer.what,
+                else => @compileError("Unexpected transformer type: " ++ @typeName(transformer)),
+            };
+
+            return JoinIter(V, U, predFn, tranFn);
+        }
+
+        pub fn join(
+            this: *const This,
+            comptime JoinedType: type,
+            comptime InnerType: type,
+            inner: Iter(InnerType),
+            comptime predicate: anytype,
+            comptime transformer: anytype,
+        ) JoinIterType(JoinedType, InnerType, predicate, transformer) {
+            return JoinIterType(JoinedType, InnerType, predicate, transformer){
+                .outer = this.iter,
+                .inner = inner,
             };
         }
 
@@ -207,6 +400,115 @@ pub fn Query(comptime T: type) type {
                 },
                 else => @compileError("Expected function or struct transformer, got " ++ @typeName(predicate)),
             }
+        }
+
+        pub fn distinct(this: *const This, allocator: std.mem.Allocator) ![]T {
+            var seen = std.AutoHashMap(T, void).init(allocator);
+            defer seen.deinit();
+
+            var num: usize = 0;
+            this.iter.seek(0);
+            while (this.iter.next()) |i| {
+                if (seen.contains(i)) continue;
+                try seen.put(i, void{});
+                num += 1;
+            }
+
+            const buffer = try allocator.alloc(T, num);
+            errdefer allocator.free(buffer);
+
+            seen.clearRetainingCapacity();
+            var i: usize = 0;
+
+            this.iter.seek(0);
+            while (this.iter.next()) |v| {
+                if (seen.contains(v)) continue;
+                try seen.put(v, void{});
+
+                buffer[i] = v;
+                i += 1;
+            }
+
+            return buffer;
+        }
+
+        pub fn distinct_order_by(this: *const This, allocator: std.mem.Allocator, selector: anytype) ![]T {
+            const info = if (@TypeOf(selector) == type) @typeInfo(selector) else @typeInfo(@TypeOf(selector));
+
+            const selectFn = switch (info) {
+                .@"fn" => |fun| fun,
+                .@"struct" => selector.what,
+                else => @compileError("Unexpected selector type: " ++ @typeName(selector)),
+            };
+
+            const fnInfo = @typeInfo(@TypeOf(selectFn)).@"fn";
+
+            if (fnInfo.return_type == null) {
+                @compileError("`order_by` selector must return a value to sort by");
+            }
+            if (fnInfo.params.len != 1) {
+                @compileError("`order_by` selector must accept a single parameter");
+            }
+            if (fnInfo.params[0].type == null or fnInfo.params[0].type.? != T) {
+                @compileError("Expected `" ++ @typeName(T) ++ "` parameter, got `" ++ @typeName(fnInfo.params[0].type) ++ "`");
+            }
+
+            const buffer = try this.distinct(allocator);
+            errdefer allocator.free(buffer);
+
+            const Compare = struct {
+                pub fn cmp(_: void, a: T, b: T) bool {
+                    return selectFn(a) < selectFn(b);
+                }
+            };
+
+            std.sort.block(T, buffer, void{}, Compare.cmp);
+            return buffer;
+        }
+
+        pub fn order_by(this: *const This, allocator: std.mem.Allocator, selector: anytype) ![]T {
+            const info = if (@TypeOf(selector) == type) @typeInfo(selector) else @typeInfo(@TypeOf(selector));
+
+            const selectFn = switch (info) {
+                .@"fn" => |fun| fun,
+                .@"struct" => selector.what,
+                else => @compileError("Unexpected selector type: " ++ @typeName(selector)),
+            };
+
+            const fnInfo = @typeInfo(@TypeOf(selectFn)).@"fn";
+
+            if (fnInfo.return_type == null) {
+                @compileError("`order_by` selector must return a value to sort by");
+            }
+            if (fnInfo.params.len != 1) {
+                @compileError("`order_by` selector must accept a single parameter");
+            }
+            if (fnInfo.params[0].type == null or fnInfo.params[0].type.? != T) {
+                @compileError("Expected `" ++ @typeName(T) ++ "` parameter, got `" ++ @typeName(fnInfo.params[0].type) ++ "`");
+            }
+
+            return try this.order_by_impl(allocator, fnInfo.return_type.?, selectFn);
+        }
+
+        fn order_by_impl(this: *const This, allocator: std.mem.Allocator, comptime F: type, comptime selector: fn (T) F) ![]T {
+            const num = this.count();
+            const buffer = try allocator.alloc(T, num);
+            errdefer allocator.free(buffer);
+
+            var i: usize = 0;
+            this.iter.seek(0);
+            while (this.iter.next()) |val| : (i += 1) {
+                buffer[i] = val;
+            }
+
+            const Compare = struct {
+                pub fn cmp(_: void, a: T, b: T) bool {
+                    return selector(a) < selector(b);
+                }
+            };
+
+            std.sort.block(T, buffer, void{}, Compare.cmp);
+            return buffer;
         }
 
         pub fn any(const_this: *const This, predicate: anytype) bool {
@@ -416,5 +718,244 @@ test "Select" {
     std.debug.print("Num Items of type 24 and in region: {}\n", .{items_of_type.count()});
     while (items_of_type.iter.next()) |item| {
         std.debug.print("  Area: {}\n", .{item});
+    }
+}
+
+test "Order By" {
+    const items = [_]u32{
+        12, 5, 16, 23, 54, 76, 36, 66, 33,
+    };
+    var sliceIter = SliceIter(u32).init(&items);
+    var query = Query(u32).init(sliceIter.to_iter());
+
+    const sorted = try query.order_by(std.testing.allocator, struct {
+        pub fn what(a: u32) u32 {
+            return a;
+        }
+    });
+    defer std.testing.allocator.free(sorted);
+
+    try std.testing.expectEqual(items.len, sorted.len);
+    try std.testing.expectEqualSlices(u32, &.{
+        5, 12, 16, 23, 33, 36, 54, 66, 76,
+    }, sorted);
+}
+
+test "Distinct" {
+    const items = [_]u32{
+        10, 10, 11, 11, 12, 12, 13, 13, 14, 14,
+    };
+    var sliceIter = SliceIter(u32).init(&items);
+    var query = Query(u32).init(sliceIter.to_iter());
+    const distinct_items = try query.distinct(std.testing.allocator);
+    defer std.testing.allocator.free(distinct_items);
+
+    try std.testing.expectEqual(5, distinct_items.len);
+    try std.testing.expectEqualSlices(u32, &.{ 10, 11, 12, 13, 14 }, distinct_items);
+}
+
+test "Order By Distinct" {
+    const items = [_]u32{
+        12, 5, 16, 23, 54, 5, 76, 36, 36, 66, 33,
+    };
+    var sliceIter = SliceIter(u32).init(&items);
+    var query = Query(u32).init(sliceIter.to_iter());
+
+    const sorted = try query.distinct_order_by(std.testing.allocator, struct {
+        pub fn what(a: u32) u32 {
+            return a;
+        }
+    });
+    defer std.testing.allocator.free(sorted);
+
+    try std.testing.expectEqual(items.len - 2, sorted.len);
+    try std.testing.expectEqualSlices(u32, &.{
+        5, 12, 16, 23, 33, 36, 54, 66, 76,
+    }, sorted);
+}
+
+test "Order By Structs" {
+    const Object = struct {
+        x: f32,
+        y: f32,
+        hp: f32,
+    };
+    const AreaHp = struct {
+        area: f32,
+        hp: f32,
+    };
+
+    const objects = [_]Object{
+        .{
+            .x = 10,
+            .y = 11,
+            .hp = 0.1,
+        },
+        .{
+            .x = 11,
+            .y = 500,
+            .hp = 1.0,
+        },
+        .{
+            .x = 499,
+            .y = 200,
+            .hp = 100,
+        },
+        .{
+            .x = 390,
+            .y = 20,
+            .hp = 4,
+        },
+        .{
+            .x = 500,
+            .y = 10,
+            .hp = 2,
+        },
+    };
+    var slit = SliceIter(Object).init(&objects);
+    var query = slit.extend();
+
+    const areasSorted = try query.select(AreaHp, struct {
+        pub fn what(obj: Object) AreaHp {
+            return .{
+                .area = obj.x * obj.y,
+                .hp = obj.hp,
+            };
+        }
+    }).extend().order_by(std.testing.allocator, struct {
+        pub fn what(a: AreaHp) f32 {
+            return a.hp;
+        }
+    });
+    defer std.testing.allocator.free(areasSorted);
+
+    try std.testing.expectEqualSlices(AreaHp, &.{
+        .{
+            .area = 110,
+            .hp = 0.1,
+        },
+        .{
+            .area = 11 * 500,
+            .hp = 1.0,
+        },
+        .{
+            .area = 5000,
+            .hp = 2,
+        },
+        .{
+            .area = 390 * 20,
+            .hp = 4,
+        },
+        .{
+            .area = 499 * 200,
+            .hp = 100,
+        },
+    }, areasSorted);
+}
+
+test "Join" {
+    const Roles = enum {
+        Guest,
+        User,
+        Admin,
+    };
+
+    const Account = struct {
+        Id: u32,
+        UserName: []const u8,
+        PasswordHash: []const u8,
+        PasswordSalt: []const u8,
+        Role: Roles,
+    };
+
+    const User = struct {
+        Id: u32,
+        AccountID: u32,
+        FirstName: []const u8,
+        LastName: []const u8,
+        Address: []const u8,
+        Email: []const u8,
+        Phone: []const u8,
+    };
+
+    const Post = struct {
+        Id: u32,
+        Title: []const u8,
+        Body: []const u8,
+        EntryUserID: u32,
+    };
+
+    const accounts = [_]Account{
+        .{ .Id = 1, .UserName = "guest", .PasswordHash = "hash1", .PasswordSalt = "salt1", .Role = .Guest },
+        .{ .Id = 2, .UserName = "alice", .PasswordHash = "hash2", .PasswordSalt = "salt2", .Role = .User },
+        .{ .Id = 3, .UserName = "bob", .PasswordHash = "hash3", .PasswordSalt = "salt3", .Role = .User },
+        .{ .Id = 4, .UserName = "carol", .PasswordHash = "hash4", .PasswordSalt = "salt4", .Role = .User },
+        .{ .Id = 5, .UserName = "dave", .PasswordHash = "hash5", .PasswordSalt = "salt5", .Role = .User },
+        .{ .Id = 6, .UserName = "admin", .PasswordHash = "hash6", .PasswordSalt = "salt6", .Role = .Admin },
+    };
+
+    const users = [_]User{
+        .{ .Id = 1, .AccountID = 2, .FirstName = "Alice", .LastName = "Anderson", .Address = "123 Maple St", .Email = "alice@example.com", .Phone = "111-1111" },
+        .{ .Id = 2, .AccountID = 3, .FirstName = "Bob", .LastName = "Brown", .Address = "456 Oak St", .Email = "bob@example.com", .Phone = "222-2222" },
+        .{ .Id = 3, .AccountID = 4, .FirstName = "Carol", .LastName = "Clark", .Address = "789 Pine St", .Email = "carol@example.com", .Phone = "333-3333" },
+        .{ .Id = 4, .AccountID = 5, .FirstName = "Dave", .LastName = "Davis", .Address = "101 Elm St", .Email = "dave@example.com", .Phone = "444-4444" },
+        .{ .Id = 5, .AccountID = 6, .FirstName = "Eve", .LastName = "Evans", .Address = "202 Birch St", .Email = "eve@example.com", .Phone = "555-5555" },
+    };
+
+    const posts = [_]Post{
+        .{ .Id = 1, .Title = "Hello", .Body = "First post", .EntryUserID = 1 }, // Alice
+        .{ .Id = 2, .Title = "My Day", .Body = "It was good", .EntryUserID = 1 }, // Alice
+        .{ .Id = 3, .Title = "Zig Tips", .Body = "Use comptime!", .EntryUserID = 2 }, // Bob
+        .{ .Id = 4, .Title = "Cooking", .Body = "Love pasta", .EntryUserID = 3 }, // Carol
+        .{ .Id = 5, .Title = "Work Log", .Body = "Busy week", .EntryUserID = 5 }, // Admin Eve
+    };
+
+    const PostUserData = struct {
+        UserName: []const u8,
+        Title: []const u8,
+        Body: []const u8,
+    };
+
+    var accountIter = SliceIter(Account).init(&accounts);
+    var userIter = SliceIter(User).init(&users);
+    var postIter = SliceIter(Post).init(&posts);
+
+    var data = accountIter.extend()
+        .where(struct {
+            pub fn what(a: Account) bool {
+                return a.Role != .Guest;
+            }
+        }).extend()
+        .join(User, User, userIter.to_iter(), struct {
+            pub fn what(a: Account, u: User) bool {
+                std.debug.print("a) {} == {}\n", .{ a.Id, u.AccountID });
+                return a.Id == u.AccountID;
+            }
+        }, struct {
+            pub fn what(a: Account, u: User) User {
+                _ = a;
+                return u;
+            }
+        }).extend()
+        .join(PostUserData, Post, postIter.to_iter(), struct {
+        pub fn what(u: User, p: Post) bool {
+            std.debug.print("b) {} == {}\n", .{ u.Id, p.EntryUserID });
+            return u.Id == p.EntryUserID;
+        }
+    }, struct {
+        pub fn what(u: User, p: Post) PostUserData {
+            return .{
+                .UserName = u.FirstName,
+                .Title = p.Title,
+                .Body = p.Body,
+            };
+        }
+    });
+    while (data.next()) |pdata| {
+        std.debug.print("{s}: {s}\n\t{s}\n~~~~~~~~~~~~~~~~~~~~\n", .{
+            pdata.UserName,
+            pdata.Title,
+            pdata.Body,
+        });
     }
 }
